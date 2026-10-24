@@ -212,6 +212,12 @@ jobs:
           OUT: ${{ runner.temp }}/arm64-insn
         run: tests/arm64-insn/smoke.sh
 
+      - name: Guest syscall regressions
+        env:
+          ISH: ${{ github.workspace }}/build/ish
+          FAKEFS: ${{ runner.temp }}/fakefs
+        run: tests/syscalls/smoke.sh
+
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
