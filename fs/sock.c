@@ -36,6 +36,7 @@ static fd_t sock_fd_create(int sock_fd, int domain, int type, int protocol) {
         cond_init(&fd->socket.unix_got_peer);
         list_init(&fd->socket.unix_scm);
         list_init(&fd->socket.unix_scm_pending);
+        list_init(&fd->socket.unix_cred_queue);
         // Darwin's AF_UNIX buffers default to 8 KB (2 KB per datagram), far
         // below Linux; Wayland and IPC traffic stalls with them.
         int bufsize = 1024 * 1024;
@@ -422,27 +423,102 @@ int_t sys_bind(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len) {
 }
 
 static void fill_cred(struct ucred_ *cred) {
-    cred->pid = current->pid;
+    cred->pid = current->tgid;
     cred->uid = current->euid;
     cred->gid = current->egid;
 }
 
+// One queued record's sender, for datagram and seqpacket sockets.
+struct cred_entry {
+    struct list queue;
+    struct ucred_ cred;
+};
+#define CRED_QUEUE_MAX 4096
+
+static bool sock_keeps_records(struct fd *sock) {
+    return sock->socket.type == SOCK_DGRAM_ || sock->socket.type == SOCK_SEQPACKET_;
+}
+
 // Record who sent the message on the receiving end, so SCM_CREDENTIALS name
 // the sending process (not the socket's creator) even if the sender has
-// already closed its end by the time the message is read.
-static void record_send_cred(struct fd *sock, const struct ucred_ *explicit_cred) {
+// already closed its end by the time the message is read. A stream remembers
+// only the last sender; datagram and seqpacket sockets queue one entry per
+// record, which the reader takes in order. Returns the queued entry, so a
+// send that then fails can take it back.
+static struct cred_entry *record_send_cred(struct fd *sock, const struct ucred_ *explicit_cred) {
     if (sock->socket.domain != AF_LOCAL_)
+        return NULL;
+    struct cred_entry *entry = NULL;
+    lock(&peer_lock);
+    struct fd *peer = sock->socket.unix_peer;
+    if (peer != NULL) {
+        struct ucred_ cred;
+        if (explicit_cred != NULL)
+            cred = *explicit_cred;
+        else
+            fill_cred(&cred);
+        if (sock_keeps_records(peer)) {
+            entry = malloc(sizeof(*entry));
+            if (entry != NULL) {
+                entry->cred = cred;
+                list_add_tail(&peer->socket.unix_cred_queue, &entry->queue);
+                // bounded: a receiver that never reads must not grow it forever
+                size_t count = 0;
+                struct cred_entry *e;
+                list_for_each_entry(&peer->socket.unix_cred_queue, e, queue)
+                    count++;
+                if (count > CRED_QUEUE_MAX) {
+                    struct cred_entry *oldest = list_first_entry(&peer->socket.unix_cred_queue, struct cred_entry, queue);
+                    if (oldest != entry) {
+                        list_remove(&oldest->queue);
+                        free(oldest);
+                    }
+                }
+            }
+        } else {
+            peer->socket.unix_recv_cred = cred;
+        }
+        peer->socket.unix_has_recv_cred = true;
+    }
+    unlock(&peer_lock);
+    return entry;
+}
+
+// The send did not happen after all.
+static void unrecord_send_cred(struct fd *sock, struct cred_entry *entry) {
+    if (entry == NULL)
         return;
     lock(&peer_lock);
     struct fd *peer = sock->socket.unix_peer;
     if (peer != NULL) {
-        if (explicit_cred != NULL)
-            peer->socket.unix_recv_cred = *explicit_cred;
-        else
-            fill_cred(&peer->socket.unix_recv_cred);
-        peer->socket.unix_has_recv_cred = true;
+        struct cred_entry *e;
+        list_for_each_entry(&peer->socket.unix_cred_queue, e, queue) {
+            if (e == entry) {
+                list_remove(&entry->queue);
+                free(entry);
+                break;
+            }
+        }
     }
     unlock(&peer_lock);
+}
+
+// A record was received on `sock`: take its sender off the queue (or just look, for MSG_PEEK).
+static bool unix_cred_take(struct fd *sock, bool peek, struct ucred_ *out) {
+    bool found = false;
+    lock(&peer_lock);
+    if (!list_empty(&sock->socket.unix_cred_queue)) {
+        struct cred_entry *entry = list_first_entry(&sock->socket.unix_cred_queue, struct cred_entry, queue);
+        if (out != NULL)
+            *out = entry->cred;
+        if (!peek) {
+            list_remove(&entry->queue);
+            free(entry);
+        }
+        found = true;
+    }
+    unlock(&peer_lock);
+    return found;
 }
 
 int_t sys_connect(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len) {
@@ -822,12 +898,14 @@ static int_t do_sendto(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t fl
         sockaddr_addr = 0;
     }
 
-    record_send_cred(sock, NULL);
+    struct cred_entry *cred_entry = record_send_cred(sock, NULL);
     ssize_t res = sendto(sock->real_fd, buffer, len, real_flags,
             sockaddr_addr ? (void *) &sockaddr : NULL, sockaddr_addr ? sockaddr_len : 0);
     free(buffer);
-    if (res < 0)
+    if (res < 0) {
+        unrecord_send_cred(sock, cred_entry);
         return seqpacket_write_err(sock, errno_map());
+    }
     return res;
 
 error:
@@ -933,6 +1011,8 @@ static ssize_t sock_host_recv(struct fd *sock, void *buf, size_t len, int flags,
     ssize_t res = recvmsg(sock->real_fd, &msg, flags);
     if (res < 0)
         return res;
+    if (sock_keeps_records(sock) && !(flags & MSG_PEEK))
+        unix_cred_take(sock, false, NULL);
     if (addr_len)
         *addr_len = msg.msg_namelen;
     for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
@@ -1156,8 +1236,10 @@ int_t sys_getsockopt(fd_t sock_fd, dword_t level, dword_t option, addr_t value_a
         *(dword_t *) value = sock->socket.domain == AF_LOCAL_ && sock->socket.unix_passcred;
     } else if (level == SOL_SOCKET_ && option == SO_PEERCRED_) {
         struct ucred_ *cred = (struct ucred_ *) value;
-        if (value_len != sizeof(*cred))
+        // a larger buffer is fine, as on Linux: fill the struct and report its size
+        if (value_len < sizeof(*cred))
             return _EINVAL;
+        value_len = sizeof(*cred);
         lock(&peer_lock);
         if (sock->socket.domain != AF_LOCAL_ || sock->socket.unix_peer == NULL) {
             cred->pid = 0;
@@ -1394,6 +1476,14 @@ static int_t do_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
         }
         if (num_fds > 253) // *magic*
             return _EINVAL;
+        // Unless privileged, a sender may only claim its own identity (net/core/scm.c)
+        if (explicit_cred != NULL && !superuser()) {
+            struct ucred_ c = *explicit_cred;
+            if (c.pid != current->tgid ||
+                    (c.uid != current->uid && c.uid != current->euid && c.uid != current->suid) ||
+                    (c.gid != current->gid && c.gid != current->egid && c.gid != current->sgid))
+                return _EPERM;
+        }
 
         if (num_fds > 0) {
             // send one (1) real fd and put the rest in a struct scm
@@ -1468,9 +1558,10 @@ scm_queued:
     if (real_flags < 0)
         goto out_free_scm;
 
-    record_send_cred(sock, explicit_cred);
+    struct cred_entry *cred_entry = record_send_cred(sock, explicit_cred);
     err = sendmsg(sock->real_fd, &msg, real_flags);
     if (err < 0) {
+        unrecord_send_cred(sock, cred_entry);
         err = seqpacket_write_err(sock, errno_map());
         goto out_free_scm;
     }
@@ -1651,6 +1742,10 @@ int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
     size_t guest_controllen = msg_fake.msg_controllen;
     msg_fake.msg_controllen = 0;
     size_t ctl_used = 0;
+    struct ucred_ record_cred;
+    bool have_record_cred = false;
+    if (res >= 0 && sock->socket.domain == AF_LOCAL_ && sock_keeps_records(sock))
+        have_record_cred = unix_cred_take(sock, !!(real_flags & MSG_PEEK), &record_cred);
     if (res >= 0 && sock->socket.domain == AF_LOCAL_ && sock->socket.unix_passcred) {
         // SO_PASSCRED: report the peer's credentials, ahead of any SCM_RIGHTS
         uint8_t creds_buf[sizeof(struct cmsghdr_) + sizeof(struct ucred_)];
@@ -1660,7 +1755,9 @@ int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
         creds->type = SCM_CREDENTIALS_;
         struct ucred_ cred = {.pid = 0, .uid = -1, .gid = -1};
         lock(&peer_lock);
-        if (sock->socket.unix_has_recv_cred)
+        if (have_record_cred)
+            cred = record_cred;
+        else if (sock->socket.unix_has_recv_cred && !sock_keeps_records(sock))
             cred = sock->socket.unix_recv_cred;
         else if (sock->socket.unix_peer != NULL)
             cred = sock->socket.unix_peer->socket.unix_cred;
@@ -1912,17 +2009,21 @@ static ssize_t sock_write(struct fd *fd, const void *buf, size_t size) {
     int eintr_count = 0;
     if (fd->socket.domain == AF_NETLINK_)
         return netlink_send(fd, buf, size);
-    record_send_cred(fd, NULL);
+    struct cred_entry *cred_entry = record_send_cred(fd, NULL);
     for (;;) {
         ssize_t res = write(fd->real_fd, buf, size);
         if (res >= 0) { err = (int)res; break; }
-        if (errno != EINTR) { err = seqpacket_write_err(fd, errno_map()); break; }
+        if (errno != EINTR) {
+            unrecord_send_cred(fd, cred_entry);
+            err = seqpacket_write_err(fd, errno_map());
+            break;
+        }
         eintr_count++;
         if (current->sighand != NULL) {
             lock(&current->sighand->lock);
             bool pending = !!(current->pending & ~current->blocked);
             unlock(&current->sighand->lock);
-            if (pending) { err = _EINTR; break; }
+            if (pending) { unrecord_send_cred(fd, cred_entry); err = _EINTR; break; }
         }
     }
     if (eintr_count >= 3) {
@@ -1952,6 +2053,11 @@ static int sock_close(struct fd *fd) {
         peer->socket.unix_peer = NULL;
     list_remove_safe(&fd->socket.unix_connecting_link);
     if (fd->socket.domain == AF_LOCAL_) {
+        while (!list_empty(&fd->socket.unix_cred_queue)) {
+            struct cred_entry *entry = list_first_entry(&fd->socket.unix_cred_queue, struct cred_entry, queue);
+            list_remove(&entry->queue);
+            free(entry);
+        }
         lock(&fd->lock);
         struct list *queues[] = {&fd->socket.unix_scm, &fd->socket.unix_scm_pending};
         for (int q = 0; q < 2; q++) {

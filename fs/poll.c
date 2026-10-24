@@ -138,6 +138,7 @@ int poll_add_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info 
     poll_fd->types = types;
     poll_fd->info = info;
     poll_fd->triggered_types = 0;
+    poll_fd->disarmed = false;
 
     if (poll_fd_is_real(poll_fd)) {
         err = real_poll_update(&poll->real, fd->real_fd, poll_fd_real_types(poll_fd, types), poll_fd);
@@ -208,6 +209,7 @@ int poll_mod_fd(struct poll *poll, struct fd *fd, int types, union poll_fd_info 
     poll_fd->types = types;
     poll_fd->info = info;
     poll_fd->triggered_types &= types;
+    poll_fd->disarmed = false;
 
     err = 0;
 out:
@@ -326,7 +328,7 @@ int epoll_fd_poll(struct fd *fd) {
     struct poll_fd *poll_fd;
     list_for_each_entry(&poll->poll_fds, poll_fd, fds) {
         struct fd *member = poll_fd->fd;
-        if (member == fd || member->ops->poll == NULL)
+        if (poll_fd->disarmed || member == fd || member->ops->poll == NULL)
             continue;
         int types = member->ops->poll(member);
         types &= poll_fd->types | POLL_HUP | POLL_ERR;
@@ -363,6 +365,8 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
         struct poll_fd *poll_fd, *tmp;
         list_for_each_entry_safe(&poll_->poll_fds, poll_fd, tmp, fds) {
             struct fd *fd = poll_fd->fd;
+            if (poll_fd->disarmed)
+                continue;
             int poll_types = 0;
             if (fd->ops->poll)
                 poll_types = fd->ops->poll(fd);
@@ -379,13 +383,13 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
                 // thread can get each oneshot event. This doesn't solve the
                 // thundering herd problem at all, but at least the semantics
                 // are right. I'll just leave that as a TODO.
+                // The entry stays in the interest list, disarmed, so that
+                // EPOLL_CTL_MOD can re-arm it and EPOLL_CTL_ADD sees it.
                 if (poll_fd->types & POLL_ONESHOT) {
-                    list_remove(&poll_fd->polls);
-                    list_remove(&poll_fd->fds);
+                    poll_fd->disarmed = true;
                     if (poll_fd_is_real(poll_fd)) {
                         real_poll_update(&poll_->real, fd->real_fd, 0, NULL);
                     }
-                    free(poll_fd);
                 }
 
                 if (poll_fd->types & POLL_EDGETRIGGERED) {

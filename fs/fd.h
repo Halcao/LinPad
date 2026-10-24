@@ -82,6 +82,9 @@ struct fd {
             // send time so they survive the sender closing (SCM_CREDENTIALS)
             struct ucred_ unix_recv_cred;
             bool unix_has_recv_cred;
+            // Datagram and seqpacket sockets keep one entry per queued record
+            // instead, so each record reports its own sender (locked by peer_lock)
+            struct list unix_cred_queue;
             // AF_NETLINK: host end that replies are written to, port id, groups
             int netlink_peer;
             uint32_t netlink_pid;
