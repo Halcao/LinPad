@@ -224,6 +224,8 @@ int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr
 dword_t sys_kill(pid_t_ pid, dword_t sig);
 dword_t sys_tkill(pid_t_ tid, dword_t sig);
 dword_t sys_tgkill(pid_t_ tgid, pid_t_ tid, dword_t sig);
+dword_t sys_rt_sigqueueinfo(pid_t_ pid, dword_t sig, addr_t info_addr);
+dword_t sys_rt_tgsigqueueinfo(pid_t_ tgid, pid_t_ tid, dword_t sig, addr_t info_addr);
 
 // signal frame structs. There's a good chance this should go in its own header file
 

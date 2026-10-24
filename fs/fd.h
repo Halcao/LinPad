@@ -34,6 +34,7 @@ struct fd {
         } epollfd;
         struct {
             uint64_t val;
+            bool semaphore; // EFD_SEMAPHORE: each read takes 1
         } eventfd;
         struct {
             struct timer *timer;
