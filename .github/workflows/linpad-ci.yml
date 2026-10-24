@@ -166,6 +166,9 @@ jobs:
       - name: Native poll readiness regressions
         run: tests/unit/poll-test.sh
 
+      - name: JIT executable-memory probe
+        run: tests/unit/jit-probe-test.sh
+
       - name: Terminal keyboard geometry regressions
         run: tests/unit/terminal-keyboard-test.sh
 
