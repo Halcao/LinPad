@@ -1101,6 +1101,19 @@ int_t sys_pause() {
     return _EINTR;
 }
 
+// Takes the first queued signal in `set` off the current task. Call with the sighand lock held.
+static struct sigqueue *dequeue_waited_signal(sigset_t_ set) {
+    struct sigqueue *sigqueue;
+    list_for_each_entry(&current->queue, sigqueue, queue) {
+        if (sigset_has(set, sigqueue->info.sig)) {
+            list_remove(&sigqueue->queue);
+            sigset_del(&current->pending, sigqueue->info.sig);
+            return sigqueue;
+        }
+    }
+    return NULL;
+}
+
 int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr, uint_t set_size) {
     sigset_t_ set;
     int err = user_get_sigset(set_addr, set_size, &set);
@@ -1118,28 +1131,24 @@ int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr
 
     lock(&current->sighand->lock);
     assert(current->waiting == 0);
-    current->waiting = set;
-    int wait_err;
-    do {
-        wait_err = wait_for(&current->pause, &current->sighand->lock, timeout_addr == 0 ? NULL : &timeout);
-    } while (wait_err == 0);
-    current->waiting = 0;
-    if (wait_err == _ETIMEDOUT) {
-        unlock(&current->sighand->lock);
-        STRACE("sigtimedwait timed out\n");
-        return _EAGAIN;
-    }
-
-    struct sigqueue *sigqueue;
-    bool found = false;
-    list_for_each_entry(&current->queue, sigqueue, queue) {
-        if (sigset_has(set, sigqueue->info.sig)) {
-            found = true;
-            list_remove(&sigqueue->queue);
-            break;
+    struct sigqueue *sigqueue = dequeue_waited_signal(set);
+    if (sigqueue == NULL) {
+        // nothing pending yet: sleep until a signal in the set arrives
+        current->waiting = set;
+        int wait_err;
+        do {
+            wait_err = wait_for(&current->pause, &current->sighand->lock, timeout_addr == 0 ? NULL : &timeout);
+        } while (wait_err == 0);
+        current->waiting = 0;
+        if (wait_err == _ETIMEDOUT) {
+            unlock(&current->sighand->lock);
+            STRACE("sigtimedwait timed out\n");
+            return _EAGAIN;
         }
+        sigqueue = dequeue_waited_signal(set);
     }
     unlock(&current->sighand->lock);
+    bool found = sigqueue != NULL;
     if (!found)
         return _EINTR;
     struct siginfo_ info = sigqueue->info;
@@ -1151,20 +1160,24 @@ int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr
     return info.sig;
 }
 
-static int kill_task(struct task *task, dword_t sig) {
+static int kill_task_info(struct task *task, dword_t sig, struct siginfo_ info) {
     if (!superuser() &&
             current->uid != task->uid &&
             current->uid != task->suid &&
             current->euid != task->uid &&
             current->euid != task->suid)
         return _EPERM;
+    send_signal(task, sig, info);
+    return 0;
+}
+
+static int kill_task(struct task *task, dword_t sig) {
     struct siginfo_ info = {
         .code = SI_USER_,
         .kill.pid = current->pid,
         .kill.uid = current->uid,
     };
-    send_signal(task, sig, info);
-    return 0;
+    return kill_task_info(task, sig, info);
 }
 
 // Signal a set of processes collected under pids_lock. The lock is taken again
@@ -1265,6 +1278,44 @@ static int do_kill(pid_t_ pid, dword_t sig, pid_t_ tgid) {
 dword_t sys_kill(pid_t_ pid, dword_t sig) {
     return do_kill(pid, sig, 0);
 }
+// rt_sigqueueinfo / rt_tgsigqueueinfo: send a signal with caller-supplied siginfo.
+// Like Linux, only the sender itself may forge a positive si_code (SI_USER and up).
+static int queue_signal_info(pid_t_ tid, pid_t_ tgid, dword_t sig, addr_t info_addr) {
+    if (sig >= NUM_SIGS)
+        return _EINVAL;
+    struct siginfo_ info;
+    if (user_get(info_addr, info))
+        return _EFAULT;
+
+    lock(&pids_lock);
+    struct task *task = pid_get_task(tid);
+    if (task == NULL || (tgid != 0 && task->tgid != tgid)) {
+        unlock(&pids_lock);
+        return _ESRCH;
+    }
+    if ((info.code >= 0 || info.code == SI_TKILL_) && task->group != current->group) {
+        unlock(&pids_lock);
+        return _EPERM;
+    }
+    int err = kill_task_info(task, sig, info);
+    unlock(&pids_lock);
+    return err;
+}
+
+dword_t sys_rt_sigqueueinfo(pid_t_ pid, dword_t sig, addr_t info_addr) {
+    STRACE("rt_sigqueueinfo(%d, %d, %#x)", pid, sig, info_addr);
+    if (pid <= 0)
+        return _EINVAL;
+    return queue_signal_info(pid, 0, sig, info_addr);
+}
+
+dword_t sys_rt_tgsigqueueinfo(pid_t_ tgid, pid_t_ tid, dword_t sig, addr_t info_addr) {
+    STRACE("rt_tgsigqueueinfo(%d, %d, %d, %#x)", tgid, tid, sig, info_addr);
+    if (tid <= 0 || tgid <= 0)
+        return _EINVAL;
+    return queue_signal_info(tid, tgid, sig, info_addr);
+}
+
 dword_t sys_tgkill(pid_t_ tgid, pid_t_ tid, dword_t sig) {
     if (tid <= 0 || tgid <= 0)
         return _EINVAL;

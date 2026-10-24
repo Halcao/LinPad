@@ -344,11 +344,17 @@ int_t sys_timer_create(dword_t clock, addr_t sigevent_addr, addr_t timer_addr) {
     if (sigev.method != SIGEV_SIGNAL_ && sigev.method != SIGEV_NONE_ && sigev.method != SIGEV_THREAD_ID_)
         return _EINVAL;
 
+    if (sigev.method != SIGEV_NONE_ && (sigev.signo <= 0 || sigev.signo >= NUM_SIGS))
+        return _EINVAL;
+
     if (sigev.method == SIGEV_THREAD_ID_) {
+        // the target must be a thread of the calling process
         lock(&pids_lock);
-        if (pid_get_task(sigev.tid) == NULL)
-            return _EINVAL;
+        struct task *target = pid_get_task(sigev.tid);
+        bool valid = target != NULL && target->group == current->group;
         unlock(&pids_lock);
+        if (!valid)
+            return _EINVAL;
     }
 
     struct tgroup *group = current->group;
@@ -375,10 +381,10 @@ int_t sys_timer_create(dword_t clock, addr_t sigevent_addr, addr_t timer_addr) {
     timer->tgroup = NULL;
     if (sigev.method == SIGEV_SIGNAL_) {
         timer->tgroup = group;
-        timer->thread_pid = 0;
+        timer->thread_pid = group->leader->pid;
     } else if (sigev.method == SIGEV_THREAD_ID_) {
         timer->tgroup = group;
-        timer->thread_pid = group->leader->pid;
+        timer->thread_pid = sigev.tid;
     }
     unlock(&group->lock);
     return 0;

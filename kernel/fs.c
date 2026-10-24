@@ -34,7 +34,8 @@ int access_check(struct statbuf *stat, int check) {
     } else if (current->egid == stat->gid) {
         check <<= 3;
     }
-    if (!(stat->mode & check))
+    // every requested permission must be granted, not just one of them
+    if ((stat->mode & check) != check)
         return _EACCES;
     return 0;
 }
