@@ -137,15 +137,8 @@ static ssize_t signalfd_read(struct fd *fd, void *buf, size_t bufsize) {
     if (info.signo == SIGCHLD_) {
         info.pid = sigqueue->info.child.pid;
         info.uid = sigqueue->info.child.uid;
-        // child.status holds a wait status; report it the way siginfo does
-        int_t wstatus = sigqueue->info.child.status;
-        if ((wstatus & 0x7f) == 0) {
-            info.code = 1; // CLD_EXITED
-            info.status = (wstatus >> 8) & 0xff;
-        } else {
-            info.code = 2; // CLD_KILLED
-            info.status = wstatus & 0x7f;
-        }
+        // the queued siginfo already carries CLD_* and the exit code or signal
+        info.status = sigqueue->info.child.status;
         info.utime = sigqueue->info.child.utime;
         info.stime = sigqueue->info.child.stime;
     } else {
