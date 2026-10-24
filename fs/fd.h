@@ -85,6 +85,19 @@ struct fd {
             // Datagram and seqpacket sockets keep one entry per queued record
             // instead, so each record reports its own sender (locked by peer_lock)
             struct list unix_cred_queue;
+            // AF_UNIX SOCK_SEQPACKET made by socket(): Darwin has no such socket, so the
+            // host end is a stream carrying records, each a uint32 length then the payload.
+            // (A socketpair uses a datagram pair, which keeps boundaries itself.)
+            bool seq_framed;
+            lock_t seq_tx_lock; // one record is written at a time
+            lock_t seq_rx_lock; // guards the record being read
+            uint8_t seq_hdr[sizeof(uint32_t)];
+            size_t seq_hdr_got;
+            uint8_t *seq_rec; // payload of the record being read
+            uint32_t seq_rec_len;
+            size_t seq_rec_got;
+            bool seq_rec_ready;
+            int seq_rec_fd; // the placeholder fd that arrived with the record, or -1
             // AF_NETLINK: host end that replies are written to, port id, groups
             int netlink_peer;
             uint32_t netlink_pid;
