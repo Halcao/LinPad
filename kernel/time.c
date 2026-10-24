@@ -109,9 +109,8 @@ dword_t sys_clock_settime(dword_t UNUSED(clock), addr_t UNUSED(tp)) {
 }
 
 static void itimer_notify(struct task *task) {
-    struct siginfo_ info = {
-        .code = SI_TIMER_,
-    };
+    // an interval timer's SIGALRM comes from the kernel; SI_TIMER is for POSIX timers, which have ids
+    struct siginfo_ info = SIGINFO_NIL;
     lock(&pids_lock);
     send_process_signal(task, SIGALRM_, info);
     unlock(&pids_lock);

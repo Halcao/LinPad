@@ -288,8 +288,21 @@ static int send_signal_common(struct task *task, int sig, struct siginfo_ info, 
     // signal zero is for testing whether a process exists
     if (sig == 0)
         return 0;
-    if (task->zombie || task->exiting)
-        return 0;
+    if (task->zombie || task->exiting) {
+        // a process's signal still has somewhere to go while another of its threads is running
+        if (!shared || !signal_is_blockable(sig))
+            return 0;
+        struct task *alive = NULL, *thread;
+        list_for_each_entry(&task->group->threads, thread, group_links) {
+            if (!thread->exiting && !thread->zombie && thread->sighand != NULL) {
+                alive = thread;
+                break;
+            }
+        }
+        if (alive == NULL)
+            return 0;
+        task = alive;
+    }
 #ifdef GUEST_ARM64
     if ((sig == SIGTRAP_ || sig == SIGABRT_ || sig == SIGILL_ || sig == SIGSEGV_ || sig == SIGBUS_)
         && ish_exec_trace())
@@ -930,18 +943,21 @@ void receive_signals() {
     blocked &= ~UNBLOCKABLE_MASK;
     struct sigqueue *sigqueue;
     while ((sigqueue = dequeue_signal(~blocked)) != NULL) {
-        int sig = sigqueue->info.sig;
+        // Free the entry first: a fatal signal never returns from receive_signal, and
+        // its RLIMIT_SIGPENDING charge would be kept for ever.
+        struct siginfo_ info = sigqueue->info;
+        sigqueue_free(sigqueue);
+        int sig = info.sig;
         bool handler = false;
         if (current->ptrace.traced && sig != SIGKILL_) {
             // This notifies the parent, goes to sleep, and waits for the
             // parent to tell it to continue.
             // Any signals received while waiting are left on the queue, except
             // for SIGKILL_, which causes an immediate exit.
-            signal_delivery_stop(sig, &sigqueue->info);
+            signal_delivery_stop(sig, &info);
         } else {
-            handler = receive_signal(sighand, &sigqueue->info);
+            handler = receive_signal(sighand, &info);
         }
-        sigqueue_free(sigqueue);
         if (handler)
             break;
     }
@@ -1308,6 +1324,7 @@ int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr
     int err = user_get_sigset(set_addr, set_size, &set);
     if (err)
         return err;
+    set &= ~UNBLOCKABLE_MASK; // SIGKILL and SIGSTOP cannot be waited for
     struct timespec timeout;
     if (timeout_addr != 0) {
         struct timespec_ fake_timeout;
