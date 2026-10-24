@@ -85,6 +85,9 @@ struct fd {
             // Datagram and seqpacket sockets keep one entry per queued record
             // instead, so each record reports its own sender (locked by peer_lock)
             struct list unix_cred_queue;
+            // held while a record's sender is queued and the record is written, so concurrent
+            // senders on one socket cannot swap the order of the two
+            lock_t unix_send_lock;
             // AF_NETLINK: host end that replies are written to, port id, groups
             int netlink_peer;
             uint32_t netlink_pid;
