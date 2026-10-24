@@ -974,7 +974,7 @@ static int sock_wait_for(int real_fd, short events, int timeout_opt) {
     for (;;) {
         if (current->sighand != NULL) {
             lock(&current->sighand->lock);
-            bool pending = !!(current->pending & ~current->blocked);
+            bool pending = !!task_pending_unblocked(current);
             unlock(&current->sighand->lock);
             if (pending)
                 return _EINTR;
@@ -2277,7 +2277,7 @@ static ssize_t sock_read(struct fd *fd, void *buf, size_t size) {
         // original realfs_read behavior for spurious EINTR).
         if (current->sighand != NULL) {
             lock(&current->sighand->lock);
-            bool pending = !!(current->pending & ~current->blocked);
+            bool pending = !!task_pending_unblocked(current);
             unlock(&current->sighand->lock);
             if (pending) { err = _EINTR; break; }
         }
@@ -2316,7 +2316,7 @@ static ssize_t sock_write(struct fd *fd, const void *buf, size_t size) {
         eintr_count++;
         if (current->sighand != NULL) {
             lock(&current->sighand->lock);
-            bool pending = !!(current->pending & ~current->blocked);
+            bool pending = !!task_pending_unblocked(current);
             unlock(&current->sighand->lock);
             if (pending) { unrecord_send_cred(fd, cred_entry); err = _EINTR; break; }
         }

@@ -404,7 +404,7 @@ int poll_wait(struct poll *poll_, poll_callback_t callback, void *context, struc
         bool signal_pending = false;
         if (current->sighand != NULL) {
             lock(&current->sighand->lock);
-            signal_pending = !!(current->pending & ~current->blocked);
+            signal_pending = !!task_pending_unblocked(current);
             unlock(&current->sighand->lock);
         }
         if (signal_pending) {

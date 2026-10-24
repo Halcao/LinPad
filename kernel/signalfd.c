@@ -82,27 +82,6 @@ fd_t sys_signalfd4(fd_t f, addr_t mask_addr, uint_t mask_size, int_t flags) {
     return f_install(fd, flags);
 }
 
-// Caller holds current->sighand->lock. Returns NULL if nothing in mask is queued.
-static struct sigqueue *signalfd_dequeue(sigset_t_ mask) {
-    struct sigqueue *sigqueue;
-    list_for_each_entry(&current->queue, sigqueue, queue) {
-        if (sigset_has(mask, sigqueue->info.sig)) {
-            list_remove(&sigqueue->queue);
-            int sig = sigqueue->info.sig;
-            bool more = false;
-            struct sigqueue *other;
-            list_for_each_entry(&current->queue, other, queue) {
-                if (other->info.sig == sig)
-                    more = true;
-            }
-            if (!more)
-                sigset_del(&current->pending, sig);
-            return sigqueue;
-        }
-    }
-    return NULL;
-}
-
 static ssize_t signalfd_read(struct fd *fd, void *buf, size_t bufsize) {
     if (bufsize < sizeof(struct signalfd_siginfo_))
         return _EINVAL;
@@ -112,12 +91,12 @@ static ssize_t signalfd_read(struct fd *fd, void *buf, size_t bufsize) {
 
     lock(&current->sighand->lock);
     struct sigqueue *sigqueue;
-    while ((sigqueue = signalfd_dequeue(mask)) == NULL) {
+    while ((sigqueue = dequeue_signal(mask)) == NULL) {
         if (fd->flags & O_NONBLOCK_) {
             unlock(&current->sighand->lock);
             return _EAGAIN;
         }
-        if (current->pending & ~current->blocked) {
+        if (task_pending_unblocked(current)) {
             unlock(&current->sighand->lock);
             return _EINTR;
         }
@@ -145,7 +124,12 @@ static ssize_t signalfd_read(struct fd *fd, void *buf, size_t bufsize) {
         info.pid = sigqueue->info.kill.pid;
         info.uid = sigqueue->info.kill.uid;
     }
-    free(sigqueue);
+    if (info.code == SI_TIMER_) {
+        info.tid = sigqueue->info.timer.timer;
+        info.overrun = sigqueue->info.timer.overrun;
+        info.int_ = sigqueue->info.timer.value.sv_int;
+    }
+    sigqueue_free(sigqueue);
     memcpy(buf, &info, sizeof(info));
     return sizeof(info);
 }
@@ -155,7 +139,7 @@ static int signalfd_poll(struct fd *fd) {
     sigset_t_ mask = fd->signalfd.mask;
     unlock(&signalfds_lock);
     lock(&current->sighand->lock);
-    bool ready = !!(current->pending & mask);
+    bool ready = !!(task_pending_all(current) & mask);
     unlock(&current->sighand->lock);
     return ready ? POLL_READ : 0;
 }
