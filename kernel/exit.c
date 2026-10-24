@@ -137,7 +137,7 @@ noreturn void do_exit(int status) {
     struct sigqueue *sigqueue, *sigqueue_tmp;
     list_for_each_entry_safe(&current->queue, sigqueue, sigqueue_tmp, queue) {
         list_remove(&sigqueue->queue);
-        free(sigqueue);
+        sigqueue_free(sigqueue);
     }
     struct task *leader = current->group->leader;
 
@@ -182,7 +182,7 @@ noreturn void do_exit(int status) {
                 .child.stime = clock_from_timeval(group_rusage.stime),
             };
             if (leader->exit_signal != 0)
-                send_signal(parent, leader->exit_signal, info);
+                send_process_signal(parent, leader->exit_signal, info);
         }
 
         if (exit_hook != NULL)
@@ -476,7 +476,7 @@ void de_thread(void) {
     list_for_each_entry_safe(&current->queue, sigqueue, sigqueue_tmp, queue) {
         if (sigqueue->info.sig == SIGKILL_) {
             list_remove(&sigqueue->queue);
-            free(sigqueue);
+            sigqueue_free(sigqueue);
         }
     }
     sigset_del(&current->pending, SIGKILL_);
@@ -593,6 +593,13 @@ static bool reap_if_zombie(struct task *task, struct siginfo_ *info_out, struct 
 
     // tear down group
     cond_destroy(&task->group->child_exit);
+    {
+        struct sigqueue *sigqueue, *sigqueue_tmp;
+        list_for_each_entry_safe(&task->group->shared_queue, sigqueue, sigqueue_tmp, queue) {
+            list_remove(&sigqueue->queue);
+            sigqueue_free(sigqueue);
+        }
+    }
     task_leave_session(task);
     list_remove(&task->group->pgroup);
     free(task->group);
