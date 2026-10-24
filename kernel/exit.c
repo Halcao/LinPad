@@ -171,11 +171,13 @@ noreturn void do_exit(int status) {
         } else {
             leader->zombie = true;
             notify(&parent->group->child_exit);
+            // exit_code is a wait status: exit code << 8, or terminating signal | 0x80 if dumped
+            int child_signal = current->exit_code & 0x7f;
             struct siginfo_ info = {
-                .code = SI_KERNEL_,
+                .code = child_signal == 0 ? CLD_EXITED_ : (current->exit_code & 0x80 ? CLD_DUMPED_ : CLD_KILLED_),
                 .child.pid = current->pid,
                 .child.uid = current->uid,
-                .child.status = current->exit_code,
+                .child.status = child_signal == 0 ? (current->exit_code >> 8) & 0xff : child_signal,
                 .child.utime = clock_from_timeval(group_rusage.utime),
                 .child.stime = clock_from_timeval(group_rusage.stime),
             };

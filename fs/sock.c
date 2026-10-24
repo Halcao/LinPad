@@ -790,7 +790,7 @@ static int sock_fastopen_connect(struct fd *sock, struct sockaddr_max_ *sockaddr
     return errno_map();
 }
 
-int_t sys_sendto(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t flags, addr_t sockaddr_addr, dword_t sockaddr_len) {
+static int_t do_sendto(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t flags, addr_t sockaddr_addr, dword_t sockaddr_len) {
     struct fd *sock = sock_getfd(sock_fd);
     if (sock == NULL)
         return sock_getfd_error(sock_fd);
@@ -1049,6 +1049,13 @@ int_t sys_recvfrom(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t flags,
     return res;
 }
 
+int_t sys_sendto(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t flags, addr_t sockaddr_addr, dword_t sockaddr_len) {
+    errno_suppress_sigpipe = flags & MSG_NOSIGNAL_;
+    int_t res = do_sendto(sock_fd, buffer_addr, len, flags, sockaddr_addr, sockaddr_len);
+    errno_suppress_sigpipe = false;
+    return res;
+}
+
 int_t sys_send(fd_t sock_fd, addr_t buf, dword_t len, int_t flags) {
     return sys_sendto(sock_fd, buf, len, flags, 0, 0);
 }
@@ -1251,7 +1258,7 @@ static void scm_put(struct scm *scm) {
     free(scm);
 }
 
-int_t sys_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
+static int_t do_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
     int err;
     STRACE("sendmsg(%d, %#x, %d)", sock_fd, msghdr_addr, flags);
     struct fd *sock = sock_getfd(sock_fd);
@@ -1800,6 +1807,13 @@ int_t sys_recvmmsg(fd_t sock_fd, addr_t msg_vec, uint_t vec_len, int_t flags, ad
             break;
     }
     return num_recv;
+}
+
+int_t sys_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
+    errno_suppress_sigpipe = flags & MSG_NOSIGNAL_;
+    int_t res = do_sendmsg(sock_fd, msghdr_addr, flags);
+    errno_suppress_sigpipe = false;
+    return res;
 }
 
 int_t sys_sendmmsg(fd_t sock_fd, addr_t msg_vec, uint_t vec_len, int_t flags) {
