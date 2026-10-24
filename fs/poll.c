@@ -169,7 +169,8 @@ int poll_del_fd(struct poll *poll, struct fd *fd) {
         goto out;
     }
 
-    if (poll_fd_is_real(poll_fd)) {
+    // a oneshot entry that fired is already off the host set
+    if (poll_fd_is_real(poll_fd) && !poll_fd->disarmed) {
         err = real_poll_update(&poll->real, fd->real_fd, 0, poll_fd);
         if (err < 0) {
             err = errno_map();

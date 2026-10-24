@@ -454,6 +454,9 @@ static int tmpfs_mmap(struct fd *fd, struct mem *mem, page_t start, pages_t page
     struct tmp_inode *inode = tmpfs_fd_inode(fd);
     if (!S_ISREG(inode->stat.mode))
         return _ENODEV;
+    // the mapping starts as a copy of the file, so the descriptor has to be readable
+    if ((fd->flags & O_ACCMODE_) == O_WRONLY_)
+        return _EACCES;
     size_t map_size = pages * PAGE_SIZE;
     char *memory = mem_host_alloc_fails() ? MAP_FAILED : mmap(NULL, map_size,
             PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

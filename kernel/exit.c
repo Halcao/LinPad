@@ -171,13 +171,18 @@ noreturn void do_exit(int status) {
         } else {
             leader->zombie = true;
             notify(&parent->group->child_exit);
-            // exit_code is a wait status: exit code << 8, or terminating signal | 0x80 if dumped
-            int child_signal = current->exit_code & 0x7f;
+            // The child's wait status is its leader's, or the group's after exit_group, whichever
+            // thread happens to be the last to exit: the same one waitpid reports (reap_if_zombie).
+            // It is the exit code << 8, or the terminating signal | 0x80 if it dumped core.
+            dword_t wait_status = leader->exit_code;
+            if (current->group->doing_group_exit)
+                wait_status = current->group->group_exit_code;
+            int child_signal = wait_status & 0x7f;
             struct siginfo_ info = {
-                .code = child_signal == 0 ? CLD_EXITED_ : (current->exit_code & 0x80 ? CLD_DUMPED_ : CLD_KILLED_),
-                .child.pid = current->pid,
-                .child.uid = current->uid,
-                .child.status = child_signal == 0 ? (current->exit_code >> 8) & 0xff : child_signal,
+                .code = child_signal == 0 ? CLD_EXITED_ : (wait_status & 0x80 ? CLD_DUMPED_ : CLD_KILLED_),
+                .child.pid = leader->pid,
+                .child.uid = leader->uid,
+                .child.status = child_signal == 0 ? (wait_status >> 8) & 0xff : child_signal,
                 .child.utime = clock_from_timeval(group_rusage.utime),
                 .child.stime = clock_from_timeval(group_rusage.stime),
             };
