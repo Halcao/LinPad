@@ -99,6 +99,19 @@ int main(void) {
     r = recv(s, buf, sizeof(buf), 0);
     CHECK(r == 6, "read after peek r=%zd", r);
 
+    // MSG_TRUNC returns the record's real length, but only the buffer's size is written
+    send(c, "0123456789", 10, 0);
+    char small[8];
+    memset(small, 'z', sizeof(small));
+    r = recv(s, small, 3, MSG_TRUNC);
+    CHECK(r == 10 && memcmp(small, "012", 3) == 0 && small[3] == 'z' && small[7] == 'z',
+          "recv MSG_TRUNC writes only 3 bytes: r=%zd, next bytes '%c' '%c'", r, small[3], small[7]);
+
+    // a record larger than the socket buffer is refused, as on Linux
+    static char huge[2 << 20];
+    r = send(c, huge, sizeof(huge), 0);
+    CHECK(r == -1 && errno == EMSGSIZE, "oversized record: r=%zd errno=%d", r, errno);
+
     close(l);
     unlink(addr.sun_path);
     printf(failures ? "RESULT: FAIL (%d)\n" : "RESULT: PASS\n", failures);

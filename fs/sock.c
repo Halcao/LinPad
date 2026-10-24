@@ -1017,7 +1017,9 @@ static void scm_put(struct scm *scm);
 // returns its real length, a zero-length record reads as 0, and a closed peer
 // (EOF between records) reads as 0 too.
 
-#define SEQ_RECORD_MAX (4u << 20)
+// A record has to fit in the socket buffer (1 MiB, set in sock_fd_create) along with its header, as
+// on Linux, where a larger one is EMSGSIZE. Beyond that a sender could never finish writing it.
+#define SEQ_RECORD_MAX (256u << 10)
 
 static ssize_t seq_host_sendmsg(struct fd *sock, struct msghdr *msg, int flags) {
     size_t total = 0;
@@ -1377,7 +1379,8 @@ int_t sys_recvfrom(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t flags,
         }
     }
 
-    if (user_write(buffer_addr, buffer, res)) {
+    // with MSG_TRUNC the result can be the record's real length, longer than what was received
+    if (user_write(buffer_addr, buffer, (size_t) res < len ? (size_t) res : len)) {
         free(buffer);
         return _EFAULT;
     }
