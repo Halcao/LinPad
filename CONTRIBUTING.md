@@ -60,6 +60,7 @@ public builds and what may ship in them.
 | Emulator, JIT, CPU | `ISH=build/ish FAKEFS=<fakefs with gcc musl-dev> tests/arm64-insn/smoke.sh` |
 | Guest syscalls | `ISH=build/ish FAKEFS=<fakefs with gcc musl-dev> tests/syscalls/smoke.sh` (one `.c` per regression) |
 | Host poll readiness and idle waits | `tests/unit/poll-test.sh` (native compiler; no guest image) |
+| JIT executable-memory probe | `tests/unit/jit-probe-test.sh` (Apple Silicon Mac; no simulator) |
 | Native terminal keyboard geometry | `tests/unit/terminal-keyboard-test.sh` (macOS; no simulator) |
 | Release tooling | `python3 -m unittest discover -s release/tests` |
 | Guest scripts | `shellcheck --severity=warning <files>` (settings in `.shellcheckrc`) |
