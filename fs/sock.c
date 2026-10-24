@@ -41,6 +41,7 @@ static fd_t sock_fd_create(int sock_fd, int domain, int type, int protocol) {
         lock_init(&fd->socket.seq_tx_lock);
         lock_init(&fd->socket.seq_rx_lock);
         fd->socket.seq_rec_fd = -1;
+        lock_init(&fd->socket.unix_send_lock);
         // Darwin's AF_UNIX buffers default to 8 KB (2 KB per datagram), far
         // below Linux; Wayland and IPC traffic stalls with them.
         int bufsize = 1024 * 1024;
@@ -490,6 +491,16 @@ static struct cred_entry *record_send_cred(struct fd *sock, const struct ucred_ 
     return entry;
 }
 
+static void send_order_begin(struct fd *sock) {
+    if (sock->socket.domain == AF_LOCAL_ && sock_keeps_records(sock))
+        lock(&sock->socket.unix_send_lock);
+}
+
+static void send_order_end(struct fd *sock) {
+    if (sock->socket.domain == AF_LOCAL_ && sock_keeps_records(sock))
+        unlock(&sock->socket.unix_send_lock);
+}
+
 // The send did not happen after all.
 static void unrecord_send_cred(struct fd *sock, struct cred_entry *entry) {
     if (entry == NULL)
@@ -907,6 +918,7 @@ static int_t do_sendto(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t fl
         sockaddr_addr = 0;
     }
 
+    send_order_begin(sock);
     struct cred_entry *cred_entry = record_send_cred(sock, NULL);
     ssize_t res;
     if (sock->socket.seq_framed) {
@@ -919,9 +931,12 @@ static int_t do_sendto(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t fl
     }
     free(buffer);
     if (res < 0) {
+        int send_err = seqpacket_write_err(sock, errno_map());
         unrecord_send_cred(sock, cred_entry);
-        return seqpacket_write_err(sock, errno_map());
+        send_order_end(sock);
+        return send_err;
     }
+    send_order_end(sock);
     return res;
 
 error:
@@ -1827,13 +1842,16 @@ scm_queued:
     if (real_flags < 0)
         goto out_free_scm;
 
+    send_order_begin(sock);
     struct cred_entry *cred_entry = record_send_cred(sock, explicit_cred);
     err = sock_host_sendmsg(sock, &msg, real_flags);
     if (err < 0) {
-        unrecord_send_cred(sock, cred_entry);
         err = seqpacket_write_err(sock, errno_map());
+        unrecord_send_cred(sock, cred_entry);
+        send_order_end(sock);
         goto out_free_scm;
     }
+    send_order_end(sock);
     if (scm != NULL)
         scm_put(scm);
     goto out_free_iov;
@@ -2278,6 +2296,7 @@ static ssize_t sock_write(struct fd *fd, const void *buf, size_t size) {
     int eintr_count = 0;
     if (fd->socket.domain == AF_NETLINK_)
         return netlink_send(fd, buf, size);
+    send_order_begin(fd);
     struct cred_entry *cred_entry = record_send_cred(fd, NULL);
     for (;;) {
         ssize_t res;
@@ -2302,6 +2321,7 @@ static ssize_t sock_write(struct fd *fd, const void *buf, size_t size) {
             if (pending) { unrecord_send_cred(fd, cred_entry); err = _EINTR; break; }
         }
     }
+    send_order_end(fd);
     if (eintr_count >= 3) {
         ish_printk_diag("NETDIAG sock_write-eintr(pid=%d comm=%s fd=%d) count=%d err=%d\n",
                current->pid, current->comm, fd->real_fd, eintr_count, err);

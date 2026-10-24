@@ -98,6 +98,9 @@ struct fd {
             size_t seq_rec_got;
             bool seq_rec_ready;
             int seq_rec_fd; // the placeholder fd that arrived with the record, or -1
+            // held while a record's sender is queued and the record is written, so concurrent
+            // senders on one socket cannot swap the order of the two
+            lock_t unix_send_lock;
             // AF_NETLINK: host end that replies are written to, port id, groups
             int netlink_peer;
             uint32_t netlink_pid;
